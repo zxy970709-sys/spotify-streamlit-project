@@ -332,7 +332,8 @@ if "popularity" in df.columns and "genre" in df.columns:
         st.plotly_chart(fig_bar, use_container_width=True)
 
         st.markdown("""
-**How you might explain this in your presentation:**
+                    
+**Notes:**
 
 - Different ranges of the selected audio feature correspond to different popularity levels.
 - Each color is a genre, so we can see genre-specific patterns.
@@ -439,7 +440,7 @@ if "popularity" in df.columns:
             st.write(f"KNN Accuracy: **{knn_acc:.2f}**")
 
             st.markdown("""
-You can describe this as:
+Note:
 
 - I turned popularity into a binary label (high vs low) based on the sidebar threshold.
 - I compared a tree-based model (Random Forest) and a distance-based model (KNN).
