@@ -98,162 +98,349 @@ if "popularity" in filtered_df.columns:
 st.write(f"### Tracks after filtering: **{filtered_df.shape[0]}**")
 
 # =====================================================
-# === EXAMPLE TRACKS SECTION (Dataset 1 + 2 + 3)
+# === EXAMPLE TRACKS + ARTIST / SIMILARITY + SEARCH ===
 # =====================================================
-st.header("🎧 Example Tracks from Filtered Data")
+st.subheader("🎧 Example Tracks for Current Filters")
 
-if filtered_df.empty:
-    st.warning("No tracks match the current filters. Try changing genre or popularity threshold.")
+if filtered_df is None or filtered_df.empty:
+    st.warning("No tracks match the current filters. Try selecting more genres or lowering the popularity threshold.")
 else:
-    # How many examples to show
-    default_n = 20 if filtered_df.shape[0] >= 20 else filtered_df.shape[0]
-    n_rows_to_show = st.slider(
-        "Number of example tracks to display:",
-        min_value=1,
-        max_value=min(200, filtered_df.shape[0]),
-        value=default_n
-    )
-
-    example_cols = [
-        "track_name", "artist_name", "genre", "popularity",
-        "duration_m:s", "danceability", "energy", "tempo", "scale", "valence"
-    ]
-    example_cols = [c for c in example_cols if c in filtered_df.columns]
-
-    # Preserve original index so we can map back to df for similarity
-    examples_df = (
-        filtered_df
-        .sort_values("popularity", ascending=False)
-        .loc[:, example_cols]
-        .head(n_rows_to_show)
-    )
-
-    st.subheader("Dataset 1: Example Tracks")
-    st.dataframe(examples_df, use_container_width=True)
-
-    st.markdown("---")
-
-    # ---------- Dataset 2: Artist explorer ----------
-    st.subheader("Dataset 2: Explore Songs by an Artist")
-
-    if "artist_name" in examples_df.columns:
-        artists_in_examples = examples_df["artist_name"].dropna().unique().tolist()
-        if artists_in_examples:
-            selected_artist = st.selectbox(
-                "Select an artist from the example table:",
-                options=artists_in_examples
-            )
-            artist_tracks = df[df["artist_name"] == selected_artist].copy()
-            if "popularity" in artist_tracks.columns:
-                artist_tracks = artist_tracks.sort_values("popularity", ascending=False)
-
-            artist_cols = [
-                "track_name", "genre", "popularity",
-                "duration_m:s", "danceability", "energy", "tempo", "scale", "valence"
-            ]
-            artist_cols = [c for c in artist_cols if c in artist_tracks.columns]
-
-            st.write(f"Top {min(5, artist_tracks.shape[0])} tracks by **{selected_artist}** in this dataset:")
-            if not artist_tracks.empty:
-                st.dataframe(
-                    artist_tracks[artist_cols].head(5),
-                    use_container_width=True
-                )
-            else:
-                st.info("No tracks found for this artist in the dataset.")
-        else:
-            st.info("No artists available in the current examples.")
+    # ---------- Build examples_df based on filters + popularity threshold ----------
+    if "popularity" in filtered_df.columns:
+        examples_df = filtered_df[filtered_df["popularity"] >= popularity_threshold].copy()
     else:
-        st.info("Artist information is not available in this dataset.")
+        examples_df = filtered_df.copy()
 
-    st.markdown("---")
+    total_matches = examples_df.shape[0]
+    st.write(
+        f"Tracks matching current filters (genre + popularity ≥ {popularity_threshold}): "
+        f"**{total_matches}**"
+    )
 
-    # ---------- Dataset 3: Similar track finder ----------
-    st.subheader("Dataset 3: Find Similar Tracks to One Example")
-
-    if "track_name" in examples_df.columns:
-        # Labels like "Song — Artist" for dropdown
-        if "artist_name" in examples_df.columns:
-            track_labels = examples_df.apply(
-                lambda r: f"{r['track_name']} — {r['artist_name']}", axis=1
-            )
-        else:
-            track_labels = examples_df["track_name"].astype(str)
-
-        # Map label -> original index (from df/filtered_df)
-        label_to_index = {
-            label: idx for label, idx in zip(track_labels, examples_df.index)
-        }
-
-        selected_label = st.selectbox(
-            "Select a track from the example table:",
-            options=list(label_to_index.keys())
+    if total_matches == 0:
+        st.warning("No tracks match the current filters with this popularity threshold.")
+    else:
+        # Let user choose how many rows to show
+        default_n = 20 if total_matches >= 20 else total_matches
+        n_rows_to_show = st.slider(
+            "Number of example tracks to display",
+            min_value=1,
+            max_value=min(200, total_matches),
+            value=default_n,
         )
 
-        if st.button("Show similar tracks"):
-            row_idx = label_to_index[selected_label]
+        # Sort by popularity if present
+        if "popularity" in examples_df.columns:
+            examples_df = examples_df.sort_values("popularity", ascending=False)
 
-            # Prefer using the full df row for more features
-            if row_idx in df.index:
-                selected_row_full = df.loc[row_idx]
-            else:
-                selected_row_full = examples_df.loc[row_idx]
-
-            feature_candidates = [
-                "danceability", "energy", "valence", "tempo",
-                "loudness", "acousticness", "speechiness",
-                "instrumentalness", "liveness"
-            ]
-            feature_cols = [
-                c for c in feature_candidates
-                if c in df.columns and not pd.isna(selected_row_full.get(c, np.nan))
-            ]
-
-            if feature_cols:
-                # Start from full dataset
-                candidates = df.dropna(subset=feature_cols).copy()
-
-                # Same genre if possible
-                if "genre" in df.columns and not pd.isna(selected_row_full.get("genre", np.nan)):
-                    candidates = candidates[candidates["genre"] == selected_row_full["genre"]]
-
-                # Drop the selected track itself if it's in candidates (by index)
-                if row_idx in candidates.index:
-                    candidates = candidates.drop(index=row_idx)
-
-                if not candidates.empty:
-                    # Reference vector from selected track
-                    ref_vec = selected_row_full[feature_cols].astype(float).values
-
-                    def compute_distance(r):
-                        return np.linalg.norm(r[feature_cols].astype(float).values - ref_vec)
-
-                    candidates["similarity_distance"] = candidates.apply(
-                        compute_distance, axis=1
+        # ---------- Find top 3 features most related to popularity ----------
+        top_related_features = []
+        if "popularity" in examples_df.columns:
+            numeric_cols = examples_df.select_dtypes(
+                include=["int64", "float64", "int32", "float32"]
+            ).columns.tolist()
+            feature_candidates = [c for c in numeric_cols if c != "popularity"]
+            if feature_candidates:
+                corrs = examples_df[feature_candidates].corrwith(
+                    examples_df["popularity"]
+                ).abs().dropna()
+                if not corrs.empty:
+                    top_related_features = list(
+                        corrs.sort_values(ascending=False).head(3).index
                     )
 
-                    similar_tracks = candidates.sort_values("similarity_distance").head(5)
+        # Choose which columns to display (in a nice order)
+        display_df = examples_df.head(n_rows_to_show).copy()
 
-                    similar_cols = [
-                        "track_name", "artist_name", "genre", "popularity",
-                        "duration_m:s", "danceability", "energy", "tempo",
-                        "scale", "valence", "similarity_distance"
-                    ]
-                    similar_cols = [
-                        c for c in similar_cols if c in similar_tracks.columns
-                    ]
+        track_col = None
+        if "track_name" in display_df.columns:
+            track_col = "track_name"
+        elif "track" in display_df.columns:
+            track_col = "track"
+
+        artist_col = None
+        if "artist" in display_df.columns:
+            artist_col = "artist"
+        elif "artist_name" in display_df.columns:
+            artist_col = "artist_name"
+
+        preferred_order = [
+            track_col,
+            artist_col,
+            "genre",
+            "popularity",
+            "duration_m:s",
+            "danceability",
+            "energy",
+            "tempo",
+            "scale",
+            "valence",
+            "acousticness",
+            "speechiness",
+            "instrumentalness",
+            "liveness",
+        ]
+        display_cols = [c for c in preferred_order if c and c in display_df.columns]
+        # Fall back to all columns if something goes wrong
+        if display_cols:
+            display_df = display_df[display_cols]
+
+        # Center-align all table text via CSS
+        st.markdown(
+            """
+<style>
+.dataframe td, .dataframe th {
+    text-align: center !important;
+}
+</style>
+""",
+            unsafe_allow_html=True,
+        )
+
+        # Highlight top 3 most popularity-related features
+        def highlight_top_cols(col):
+            if col.name in top_related_features:
+                return ['background-color: rgba(255, 0, 0, 0.25)'] * len(col)
+            else:
+                return [''] * len(col)
+
+        styled_examples = display_df.style.apply(highlight_top_cols, axis=0)
+
+        if top_related_features:
+            st.caption(
+                "Columns highlighted in light red are the **three features most correlated "
+                f"with popularity** for the current filtered subset: "
+                f"`{', '.join(top_related_features)}`."
+            )
+
+        st.dataframe(styled_examples, use_container_width=True)
+
+        # =====================================================
+        # === ARTIST DROPDOWN: TOP SONGS FROM EXAMPLE TABLE ===
+        # =====================================================
+        st.subheader("🎤 Explore Artists from These Examples")
+
+        if artist_col is not None:
+            example_artists = (
+                display_df[artist_col].dropna().unique().tolist()
+                if artist_col in display_df.columns
+                else []
+            )
+
+            if example_artists:
+                selected_artist = st.selectbox(
+                    "Choose an artist (from the example tracks above):",
+                    sorted(example_artists),
+                    index=0,
+                )
+
+                artist_tracks = df[df[artist_col] == selected_artist].copy()
+                if "popularity" in artist_tracks.columns:
+                    artist_tracks = artist_tracks.sort_values("popularity", ascending=False)
+
+                top_n_artist = min(5, artist_tracks.shape[0])
+                if top_n_artist > 0:
+                    st.write(
+                        f"Top **{top_n_artist}** tracks by **{selected_artist}** in this dataset:"
+                    )
+
+                    artist_display_cols = []
+                    for col in [
+                        track_col,
+                        artist_col,
+                        "genre",
+                        "popularity",
+                        "duration_m:s",
+                        "danceability",
+                        "energy",
+                        "tempo",
+                        "scale",
+                        "valence",
+                    ]:
+                        if col in artist_tracks.columns and col not in artist_display_cols:
+                            artist_display_cols.append(col)
 
                     st.dataframe(
-                        similar_tracks[similar_cols],
-                        use_container_width=True
+                        artist_tracks[artist_display_cols].head(top_n_artist)
+                        if artist_display_cols
+                        else artist_tracks.head(top_n_artist),
+                        use_container_width=True,
                     )
                 else:
-                    st.warning("No candidate tracks available for similarity search.")
+                    st.info(f"No tracks for **{selected_artist}** found in the dataset.")
             else:
-                st.warning("Not enough numeric audio features available to compute similarity.")
-    else:
-        st.info("Track names are not available for similarity search.")
+                st.info("No artists found in the current example table.")
+        else:
+            st.warning("No artist column found; cannot build artist explorer.")
 
+        # =====================================================
+        # === SIMILAR TRACK FINDER (BASED ON EXAMPLES) ========
+        # =====================================================
+        st.subheader("🎯 Find Similar Tracks to One Example")
+
+        if track_col is not None:
+            # Build label "Track — Artist" for selection
+            temp_df = display_df.copy()
+            if artist_col in temp_df.columns:
+                temp_df["track_label"] = temp_df[track_col].astype(str) + " — " + temp_df[artist_col].astype(str)
+            else:
+                temp_df["track_label"] = temp_df[track_col].astype(str)
+
+            track_options = temp_df["track_label"].tolist()
+
+            selected_track_label = st.selectbox(
+                "Choose a track from the examples above:",
+                track_options,
+            )
+
+            if selected_track_label:
+                selected_row = temp_df[temp_df["track_label"] == selected_track_label].iloc[0]
+
+                # Define feature columns to measure similarity
+                similarity_features = [
+                    "danceability", "energy", "valence", "tempo", "loudness",
+                    "acousticness", "speechiness", "instrumentalness", "liveness"
+                ]
+                similarity_features = [
+                    c for c in similarity_features if c in df.columns
+                ]
+
+                if similarity_features:
+                    import numpy as np
+
+                    # 🔧 FIX: use the full row from df so all feature columns exist
+                    try:
+                        selected_row_full = df.loc[selected_row.name]
+                    except KeyError:
+                        selected_row_full = None
+
+                    if selected_row_full is None:
+                        st.info("Could not locate full feature row for the selected track.")
+                    else:
+                        # Build candidates from full df (excluding the selected track itself)
+                        candidates = df.drop(selected_row_full.name, errors="ignore").copy()
+                        candidates = candidates.dropna(subset=similarity_features)
+
+                        ref_vec = selected_row_full[similarity_features].astype(float).values
+                        cand_mat = candidates[similarity_features].astype(float).values
+
+                        # Euclidean distance
+                        dists = np.linalg.norm(cand_mat - ref_vec, axis=1)
+                        candidates["similarity_distance"] = dists
+
+                        # Get top 5 most similar tracks
+                        similar_tracks = candidates.sort_values(
+                            "similarity_distance", ascending=True
+                        ).head(5)
+
+                        sim_display_cols = []
+                        for col in [
+                            track_col, artist_col, "genre", "popularity",
+                            "duration_m:s", "danceability", "energy", "tempo",
+                            "scale", "valence", "similarity_distance"
+                        ]:
+                            if col in similar_tracks.columns and col not in sim_display_cols:
+                                sim_display_cols.append(col)
+
+                        st.write("Top **5** most similar tracks in the dataset:")
+                        st.dataframe(
+                            similar_tracks[sim_display_cols]
+                            if sim_display_cols
+                            else similar_tracks,
+                            use_container_width=True,
+                        )
+                else:
+                    st.info("Not enough numeric feature columns available to compute similarity.")
+        else:
+            st.warning("No track-name column found; cannot build similar-track finder.")
+
+# =====================================================
+# === GLOBAL ARTIST SEARCH (ACROSS WHOLE DATASET) =====
+# =====================================================
+st.subheader("🔎 Search Artist and View Top Songs (Full Dataset)")
+
+# Try to detect artist column again in full df
+artist_col_global = None
+if "artist" in df.columns:
+    artist_col_global = "artist"
+elif "artist_name" in df.columns:
+    artist_col_global = "artist_name"
+
+if artist_col_global is None:
+    st.warning("No artist column found in the dataset, so search is unavailable.")
+else:
+    search_query = st.text_input(
+        "Type an artist name (full or partial):",
+        "",
+        help="Searches across all tracks in this dataset (case-insensitive).",
+    )
+
+    if search_query.strip():
+        matches = df[df[artist_col_global].str.contains(
+            search_query, case=False, na=False
+        )].copy()
+
+        if matches.empty:
+            st.info("No artists found matching that search. Try a different spelling or a shorter fragment.")
+        else:
+            # Sort by popularity if available
+            if "popularity" in matches.columns:
+                matches = matches.sort_values("popularity", ascending=False)
+
+            total_tracks = matches.shape[0]
+
+            if total_tracks >= 10:
+                max_for_slider = min(50, total_tracks)
+                num_tracks = st.slider(
+                    "Number of top tracks to display for this artist search",
+                    min_value=10,
+                    max_value=max_for_slider,
+                    value=10,
+                )
+            else:
+                num_tracks = total_tracks
+                st.caption(
+                    f"Only {total_tracks} track(s) found for this search in the dataset."
+                )
+
+            top_tracks = matches.head(num_tracks)
+
+            # Decide track column again
+            track_col_global = None
+            if "track_name" in df.columns:
+                track_col_global = "track_name"
+            elif "track" in df.columns:
+                track_col_global = "track"
+
+            display_cols_search = []
+            for col in [
+                track_col_global,
+                artist_col_global,
+                "genre",
+                "popularity",
+                "duration_m:s",
+                "danceability",
+                "energy",
+                "tempo",
+                "scale",
+                "valence",
+            ]:
+                if col in top_tracks.columns and col not in display_cols_search:
+                    display_cols_search.append(col)
+
+            st.write(
+                f"Showing **{top_tracks.shape[0]}** track(s) matching artist search "
+                f"**“{search_query}”** (sorted by popularity)."
+            )
+
+            st.dataframe(
+                top_tracks[display_cols_search]
+                if display_cols_search
+                else top_tracks,
+                use_container_width=True,
+            )
+    else:
+        st.caption("Start typing an artist's name above to see their top songs in this dataset.")
 # =====================================================
 # === EXPLORATORY DATA ANALYSIS SECTION
 # =====================================================
