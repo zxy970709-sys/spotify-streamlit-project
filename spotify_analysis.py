@@ -114,7 +114,7 @@ else:
     if examples_raw.empty:
         st.warning("No tracks match the current filters with this popularity threshold.")
     else:
-        # ---------- Keep original df index for similarity lookups ----------
+        # ---------- Keep original df index for later lookups ----------
         examples_raw = examples_raw.reset_index().rename(columns={"index": "df_index"})
 
         # Detect track & artist columns
@@ -136,16 +136,14 @@ else:
             group_cols.append(track_col)
         if artist_col:
             group_cols.append(artist_col)
-
-        # Fallback: if we somehow don't have track/artist, just treat each row separately
         if not group_cols:
             group_cols = ["df_index"]
+
+        import pandas as pd
 
         def join_genres(series):
             vals = [str(x) for x in series.dropna().unique()]
             return ", ".join(sorted(vals)) if vals else ""
-
-        import pandas as pd
 
         agg_dict = {}
         for col in examples_raw.columns:
@@ -154,9 +152,10 @@ else:
             if col == "genre":
                 agg_dict[col] = join_genres
             elif col == "df_index":
-                agg_dict[col] = "first"   # keep a representative original index
+                agg_dict[col] = "first"
+            elif col == "popularity":
+                agg_dict[col] = "max"
             else:
-                # numeric → mean, others → first
                 if pd.api.types.is_numeric_dtype(examples_raw[col]):
                     agg_dict[col] = "mean"
                 else:
@@ -186,7 +185,7 @@ else:
             if "popularity" in examples_grouped.columns:
                 examples_grouped = examples_grouped.sort_values("popularity", ascending=False)
 
-            # ---------- Correlation for top-related features (on grouped data) ----------
+            # ---------- Correlation for top-related features ----------
             top_related_features = []
             if "popularity" in examples_grouped.columns:
                 numeric_cols = examples_grouped.select_dtypes(
@@ -220,14 +219,13 @@ else:
                 "speechiness",
                 "instrumentalness",
                 "liveness",
-                "df_index",  # keep internally, we'll hide this from the user
+                "df_index",  # internal
             ]
             display_cols = [c for c in preferred_order if c and c in display_base_df.columns]
-
             if display_cols:
                 display_base_df = display_base_df[display_cols]
 
-            # UI table should hide df_index
+            # UI DataFrame: hide df_index from display
             ui_df = display_base_df.drop(columns=["df_index"], errors="ignore")
 
             # Center-align all table text via CSS
@@ -261,7 +259,7 @@ else:
             st.dataframe(styled_examples, use_container_width=True)
 
             # =====================================================
-            # === ARTIST DROPDOWN: TOP SONGS FROM EXAMPLE TABLE ===
+            # === ARTIST DROPDOWN: TOP SONGS FROM EXAMPLES ========
             # =====================================================
             st.subheader("🎤 Explore Artists from These Examples")
 
@@ -276,13 +274,45 @@ else:
                     )
 
                     artist_tracks = df[df[artist_col] == selected_artist].copy()
-                    if "popularity" in artist_tracks.columns:
-                        artist_tracks = artist_tracks.sort_values("popularity", ascending=False)
 
-                    top_n_artist = min(5, artist_tracks.shape[0])
-                    if top_n_artist > 0:
+                    if artist_tracks.empty:
+                        st.info(f"No tracks for **{selected_artist}** found in the dataset.")
+                    else:
+                        # Deduplicate artist tracks by (track, artist) and merge genres
+                        artist_tracks = artist_tracks.reset_index().rename(columns={"index": "df_index"})
+
+                        agg_dict_at = {}
+                        for col in artist_tracks.columns:
+                            if col == "genre":
+                                agg_dict_at[col] = join_genres
+                            elif col == "df_index":
+                                agg_dict_at[col] = "first"
+                            elif col == "popularity":
+                                agg_dict_at[col] = "max"
+                            else:
+                                if pd.api.types.is_numeric_dtype(artist_tracks[col]):
+                                    agg_dict_at[col] = "mean"
+                                else:
+                                    agg_dict_at[col] = "first"
+
+                        group_cols_at = []
+                        if track_col and track_col in artist_tracks.columns:
+                            group_cols_at.append(track_col)
+                        if artist_col and artist_col in artist_tracks.columns:
+                            group_cols_at.append(artist_col)
+                        if not group_cols_at:
+                            group_cols_at = ["df_index"]
+
+                        artist_grouped = artist_tracks.groupby(group_cols_at, as_index=False).agg(agg_dict_at)
+
+                        if "popularity" in artist_grouped.columns:
+                            artist_grouped = artist_grouped.sort_values("popularity", ascending=False)
+
+                        top_n_artist = min(5, artist_grouped.shape[0])
+
                         st.write(
-                            f"Top **{top_n_artist}** tracks by **{selected_artist}** in this dataset:"
+                            f"Top **{top_n_artist}** tracks by **{selected_artist}** in this dataset "
+                            "(deduplicated by track, with all genres merged):"
                         )
 
                         artist_display_cols = []
@@ -298,17 +328,15 @@ else:
                             "scale",
                             "valence",
                         ]:
-                            if col in artist_tracks.columns and col not in artist_display_cols:
+                            if col in artist_grouped.columns and col not in artist_display_cols:
                                 artist_display_cols.append(col)
 
                         st.dataframe(
-                            artist_tracks[artist_display_cols].head(top_n_artist)
+                            artist_grouped[artist_display_cols].head(top_n_artist)
                             if artist_display_cols
-                            else artist_tracks.head(top_n_artist),
+                            else artist_grouped.head(top_n_artist),
                             use_container_width=True,
                         )
-                    else:
-                        st.info(f"No tracks for **{selected_artist}** found in the dataset.")
                 else:
                     st.info("No artists found in the current example table.")
             else:
@@ -336,10 +364,8 @@ else:
                 if selected_track_label:
                     selected_row_base = temp_df[temp_df["track_label"] == selected_track_label].iloc[0]
 
-                    # Use df_index to locate the full row in df
                     df_index_col = "df_index" if "df_index" in selected_row_base.index else None
 
-                    # Define feature columns to measure similarity
                     similarity_features = [
                         "danceability", "energy", "valence", "tempo", "loudness",
                         "acousticness", "speechiness", "instrumentalness", "liveness"
@@ -359,21 +385,44 @@ else:
                         if selected_row_full is None:
                             st.info("Could not locate full feature row for the selected track.")
                         else:
-                            # Build candidates from full df (excluding the selected track itself)
                             candidates = df.drop(selected_row_full.name, errors="ignore").copy()
                             candidates = candidates.dropna(subset=similarity_features)
 
                             ref_vec = selected_row_full[similarity_features].astype(float).values
                             cand_mat = candidates[similarity_features].astype(float).values
 
-                            # Euclidean distance
                             dists = np.linalg.norm(cand_mat - ref_vec, axis=1)
                             candidates["similarity_distance"] = dists
 
-                            # Get top 5 most similar tracks
-                            similar_tracks = candidates.sort_values(
-                                "similarity_distance", ascending=True
-                            ).head(5)
+                            # Deduplicate similar tracks and merge genres
+                            candidates = candidates.reset_index().rename(columns={"index": "df_index"})
+
+                            agg_dict_sim = {}
+                            for col in candidates.columns:
+                                if col == "genre":
+                                    agg_dict_sim[col] = join_genres
+                                elif col == "df_index":
+                                    agg_dict_sim[col] = "first"
+                                elif col == "similarity_distance":
+                                    agg_dict_sim[col] = "min"
+                                elif col == "popularity":
+                                    agg_dict_sim[col] = "max"
+                                else:
+                                    if pd.api.types.is_numeric_dtype(candidates[col]):
+                                        agg_dict_sim[col] = "mean"
+                                    else:
+                                        agg_dict_sim[col] = "first"
+
+                            group_cols_sim = []
+                            if track_col and track_col in candidates.columns:
+                                group_cols_sim.append(track_col)
+                            if artist_col and artist_col in candidates.columns:
+                                group_cols_sim.append(artist_col)
+                            if not group_cols_sim:
+                                group_cols_sim = ["df_index"]
+
+                            similar_tracks = candidates.groupby(group_cols_sim, as_index=False).agg(agg_dict_sim)
+                            similar_tracks = similar_tracks.sort_values("similarity_distance", ascending=True).head(5)
 
                             sim_display_cols = []
                             for col in [
@@ -384,7 +433,7 @@ else:
                                 if col in similar_tracks.columns and col not in sim_display_cols:
                                     sim_display_cols.append(col)
 
-                            st.write("Top **5** most similar tracks in the dataset:")
+                            st.write("Top **5** most similar tracks in the dataset (deduplicated by track, with merged genres):")
                             st.dataframe(
                                 similar_tracks[sim_display_cols]
                                 if sim_display_cols
@@ -393,6 +442,121 @@ else:
                             )
             else:
                 st.warning("No track-name column found; cannot build similar-track finder.")
+
+# =====================================================
+# === GLOBAL ARTIST SEARCH (ACROSS WHOLE DATASET) =====
+# =====================================================
+st.subheader("🔎 Search Artist and View Top Songs (Full Dataset)")
+
+artist_col_global = None
+if "artist" in df.columns:
+    artist_col_global = "artist"
+elif "artist_name" in df.columns:
+    artist_col_global = "artist_name"
+
+if artist_col_global is None:
+    st.warning("No artist column found in the dataset, so search is unavailable.")
+else:
+    search_query = st.text_input(
+        "Type an artist name (full or partial):",
+        "",
+        help="Searches across all tracks in this dataset (case-insensitive).",
+    )
+
+    if search_query.strip():
+        matches = df[df[artist_col_global].str.contains(
+            search_query, case=False, na=False
+        )].copy()
+
+        if matches.empty:
+            st.info("No artists found matching that search. Try a different spelling or a shorter fragment.")
+        else:
+            matches = matches.reset_index().rename(columns={"index": "df_index"})
+
+            def join_genres_search(series):
+                vals = [str(x) for x in series.dropna().unique()]
+                return ", ".join(sorted(vals)) if vals else ""
+
+            agg_dict_search = {}
+            for col in matches.columns:
+                if col == "genre":
+                    agg_dict_search[col] = join_genres_search
+                elif col == "df_index":
+                    agg_dict_search[col] = "first"
+                elif col == "popularity":
+                    agg_dict_search[col] = "max"
+                else:
+                    if pd.api.types.is_numeric_dtype(matches[col]):
+                        agg_dict_search[col] = "mean"
+                    else:
+                        agg_dict_search[col] = "first"
+
+            track_col_global = None
+            if "track_name" in matches.columns:
+                track_col_global = "track_name"
+            elif "track" in matches.columns:
+                track_col_global = "track"
+
+            group_cols_search = []
+            if track_col_global and track_col_global in matches.columns:
+                group_cols_search.append(track_col_global)
+            if artist_col_global and artist_col_global in matches.columns:
+                group_cols_search.append(artist_col_global)
+            if not group_cols_search:
+                group_cols_search = ["df_index"]
+
+            artist_grouped_search = matches.groupby(group_cols_search, as_index=False).agg(agg_dict_search)
+
+            if "popularity" in artist_grouped_search.columns:
+                artist_grouped_search = artist_grouped_search.sort_values("popularity", ascending=False)
+
+            total_tracks = artist_grouped_search.shape[0]
+
+            if total_tracks >= 10:
+                max_for_slider = min(50, total_tracks)
+                num_tracks = st.slider(
+                    "Number of top tracks to display for this artist search",
+                    min_value=10,
+                    max_value=max_for_slider,
+                    value=10,
+                )
+            else:
+                num_tracks = total_tracks
+                st.caption(
+                    f"Only {total_tracks} track(s) found for this search in the dataset."
+                )
+
+            top_tracks = artist_grouped_search.head(num_tracks)
+
+            display_cols_search = []
+            for col in [
+                track_col_global,
+                artist_col_global,
+                "genre",
+                "popularity",
+                "duration_m:s",
+                "danceability",
+                "energy",
+                "tempo",
+                "scale",
+                "valence",
+            ]:
+                if col in top_tracks.columns and col not in display_cols_search:
+                    display_cols_search.append(col)
+
+            st.write(
+                f"Showing **{top_tracks.shape[0]}** track(s) matching artist search "
+                f"**\"{search_query}\"** (deduplicated by track, with merged genres, sorted by popularity)."
+            )
+
+            st.dataframe(
+                top_tracks[display_cols_search]
+                if display_cols_search
+                else top_tracks,
+                use_container_width=True,
+            )
+    else:
+        st.caption("Start typing an artist's name above to see their top songs in this dataset.")
         
 # =====================================================
 # === EXPLORATORY DATA ANALYSIS SECTION
