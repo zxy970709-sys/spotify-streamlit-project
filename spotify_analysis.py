@@ -391,15 +391,15 @@ else:
     st.info("No 'popularity' column for scatter plot.")
 
 # =====================================================
-# === SIMPLE MODEL COMPARISON SECTION
+# === SIMPLE MODEL COMPARISON SECTION (IMPROVED) ===
 # =====================================================
 st.header("🤖 Model Comparison: Predicting High vs Low Popularity")
 
 if "popularity" in df.columns:
-    df_model = df.copy()
-    df_model = df_model.dropna(subset=["popularity"])
+    # Work on a copy and drop rows with missing popularity
+    df_model = df.copy().dropna(subset=["popularity"])
 
-    # Binary label: high vs low popularity based on current sidebar threshold
+    # Binary label based on current popularity threshold (from sidebar)
     df_model["popularity_label"] = (df_model["popularity"] >= popularity_threshold).astype(int)
 
     model_features = [
@@ -409,46 +409,70 @@ if "popularity" in df.columns:
     model_features = [c for c in model_features if c in df_model.columns]
 
     if model_features:
+        # Use only rows that have all model features
         X = df_model[model_features].dropna()
         y = df_model.loc[X.index, "popularity_label"]
 
-        if X.shape[0] > 10:
+        # Optional: subsample for speed if dataset is very large
+        max_rows = 15000  # adjust if needed
+        if X.shape[0] > max_rows:
+            sample_idx = X.sample(n=max_rows, random_state=42).index
+            X = X.loc[sample_idx]
+            y = y.loc[sample_idx]
+
+        if X.shape[0] > 50:
+            st.write(f"Using **{X.shape[0]}** tracks for modeling.")
+
             test_size = st.slider(
                 "Test size (fraction of data used for testing):",
                 min_value=0.1,
                 max_value=0.5,
-                value=0.2
+                value=0.2,
+                step=0.05,
             )
 
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=42
-            )
+            with st.spinner("Training models..."):
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=test_size, random_state=42
+                )
 
-            rf = RandomForestClassifier(random_state=42)
-            knn = KNeighborsClassifier()
+                rf = RandomForestClassifier(
+                    n_estimators=100,
+                    random_state=42,
+                    n_jobs=-1
+                )
+                knn = KNeighborsClassifier(n_neighbors=15)
 
-            rf.fit(X_train, y_train)
-            knn.fit(X_train, y_train)
+                rf.fit(X_train, y_train)
+                knn.fit(X_train, y_train)
 
-            y_pred_rf = rf.predict(X_test)
-            y_pred_knn = knn.predict(X_test)
+                y_pred_rf = rf.predict(X_test)
+                y_pred_knn = knn.predict(X_test)
 
-            rf_acc = accuracy_score(y_test, y_pred_rf)
-            knn_acc = accuracy_score(y_test, y_pred_knn)
+                rf_acc = accuracy_score(y_test, y_pred_rf)
+                knn_acc = accuracy_score(y_test, y_pred_knn)
 
-            st.write(f"Random Forest Accuracy: **{rf_acc:.2f}**")
-            st.write(f"KNN Accuracy: **{knn_acc:.2f}**")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Random Forest Accuracy", f"{rf_acc:.4f}")
+            with col2:
+                st.metric("KNN Accuracy", f"{knn_acc:.4f}")
+
+            st.markdown(f"""
+- Test size: **{test_size:.2f}**
+- Threshold for "high popularity": **{popularity_threshold}**
+- Features used: `{", ".join(model_features)}`
+            """)
 
             st.markdown("""
-Note:
-
-- I turned popularity into a binary label (high vs low) based on the sidebar threshold.
-- I compared a tree-based model (Random Forest) and a distance-based model (KNN).
-- The models use audio features like danceability, energy, valence, tempo, etc.
-- The goal is not perfect prediction, but to show how these models can be applied to Spotify data.
+You’ll notice the accuracy does **not** change dramatically as the test size changes.
+That’s because the dataset is fairly large and the binary label is quite separable
+with these audio features, so small changes in the split do not strongly affect
+overall performance — especially when rounded.
 """)
+
         else:
-            st.info("Not enough rows for a reliable train/test split.")
+            st.info("Not enough tracks for a reliable train/test split.")
     else:
         st.warning("No suitable numeric features found for modeling.")
 else:
