@@ -448,6 +448,7 @@ else:
 # =====================================================
 st.subheader("🔎 Search Artist and View Top Songs (Full Dataset)")
 
+# Detect artist column in the full dataset
 artist_col_global = None
 if "artist" in df.columns:
     artist_col_global = "artist"
@@ -455,15 +456,16 @@ elif "artist_name" in df.columns:
     artist_col_global = "artist_name"
 
 if artist_col_global is None:
-    st.warning("No artist column found in the dataset, so search is unavailable.")
+    st.warning("No artist column found in the dataset, so global search is unavailable.")
 else:
     search_query = st.text_input(
-        "Type an artist name (full or partial):",
+        "Type an artist name (full or partial) for global search:",
         "",
         help="Searches across all tracks in this dataset (case-insensitive).",
     )
 
     if search_query.strip():
+        # Filter by artist name (case-insensitive)
         matches = df[df[artist_col_global].str.contains(
             search_query, case=False, na=False
         )].copy()
@@ -471,26 +473,17 @@ else:
         if matches.empty:
             st.info("No artists found matching that search. Try a different spelling or a shorter fragment.")
         else:
+            import pandas as pd
+
+            # Reset index so we have a stable id if needed
             matches = matches.reset_index().rename(columns={"index": "df_index"})
 
-            def join_genres_search(series):
+            # Deduplicate by (track, artist) and merge genres
+            def join_genres_global(series):
                 vals = [str(x) for x in series.dropna().unique()]
                 return ", ".join(sorted(vals)) if vals else ""
 
-            agg_dict_search = {}
-            for col in matches.columns:
-                if col == "genre":
-                    agg_dict_search[col] = join_genres_search
-                elif col == "df_index":
-                    agg_dict_search[col] = "first"
-                elif col == "popularity":
-                    agg_dict_search[col] = "max"
-                else:
-                    if pd.api.types.is_numeric_dtype(matches[col]):
-                        agg_dict_search[col] = "mean"
-                    else:
-                        agg_dict_search[col] = "first"
-
+            # Detect track column
             track_col_global = None
             if "track_name" in matches.columns:
                 track_col_global = "track_name"
@@ -505,13 +498,31 @@ else:
             if not group_cols_search:
                 group_cols_search = ["df_index"]
 
+            agg_dict_search = {}
+            for col in matches.columns:
+                if col in group_cols_search:
+                    continue
+                if col == "genre":
+                    agg_dict_search[col] = join_genres_global
+                elif col == "df_index":
+                    agg_dict_search[col] = "first"
+                elif col == "popularity":
+                    agg_dict_search[col] = "max"
+                else:
+                    if pd.api.types.is_numeric_dtype(matches[col]):
+                        agg_dict_search[col] = "mean"
+                    else:
+                        agg_dict_search[col] = "first"
+
             artist_grouped_search = matches.groupby(group_cols_search, as_index=False).agg(agg_dict_search)
 
+            # Sort by popularity if available
             if "popularity" in artist_grouped_search.columns:
                 artist_grouped_search = artist_grouped_search.sort_values("popularity", ascending=False)
 
             total_tracks = artist_grouped_search.shape[0]
 
+            # Slider for how many tracks to show
             if total_tracks >= 10:
                 max_for_slider = min(50, total_tracks)
                 num_tracks = st.slider(
@@ -528,6 +539,7 @@ else:
 
             top_tracks = artist_grouped_search.head(num_tracks)
 
+            # Decide display columns
             display_cols_search = []
             for col in [
                 track_col_global,
